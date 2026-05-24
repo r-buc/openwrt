@@ -1,0 +1,82 @@
+--- a/cache.c
++++ b/cache.c
+@@ -102,25 +102,37 @@ cache_gc_timer(struct uloop_timeout *timeout)
+ 			cache_record_free(r);
+ 		continue;
+ 	}
+-		if (r->refresh >= 100) {
++		if (r->refresh >= 100 || cache_is_expired(r->time, r->ttl, 100)) {
+ 			cache_record_free(r);
+ 			continue;
+ 		}
+-		r->refresh += 50;
+-		dns_send_question(r->iface, (struct sockaddr *)&r->from, r->record, r->type, 0);
++		r->refresh += 5;
++		if (r->refresh <= 90) {
++			/* Send QM unicast query to last responder at 80% and 85% marks */
++			struct interface *uc_iface = interface_get(r->iface->name,
++				r->iface->type | SOCKTYPE_BIT_UNICAST);
++			dns_send_question(uc_iface ? uc_iface : r->iface,
++				(struct sockaddr *)&r->from, r->record, r->type, 1);
++		} else {
++			/* Fallback to multicast at 90% and 95% marks if no response received */
++			dns_send_question(r->iface, NULL, r->record, r->type, 1);
++		}
+ 	}
+ 
+ 	avl_for_each_element_safe(&services, s, avl, t) {
+ 		if (!s->host)
+ 			continue;
+ 		if (!cache_is_expired(s->time, s->ttl, s->refresh))
+ 			continue;
+-		if (s->refresh >= 100) {
++		if (s->refresh >= 100 || cache_is_expired(s->time, s->ttl, 100)) {
+ 			cache_service_free(s);
+ 			continue;
+ 		}
+-		s->refresh += 50;
+-		cache_refresh_service(s);
++		s->refresh += 5;
++		/* Services have no stored last-responder address, so only multicast
++		 * queries are possible.  Send at the 90% and 95% marks. */
++		if (s->refresh > 90)
++			cache_refresh_service(s);
+ 	}
+ 
+ 	uloop_timeout_set(timeout, 10000);
+@@ -172,7 +184,7 @@ cache_service(struct interface *iface, char *entry, size_t hlen, int ttl)
+ 
+ 	avl_for_each_element_safe(&services, s, avl, t)
+ 		if (!strcmp(s->entry, entry)) {
+-			s->refresh = 50;
++			s->refresh = 80;
+ 			s->time = monotonic_time();
+ 			s->ttl = ttl;
+ 			return s;
+@@ -186,7 +198,7 @@ cache_service(struct interface *iface, char *entry, size_t hlen, int ttl)
+ 	s->time = monotonic_time();
+ 	s->ttl = ttl;
+ 	s->iface = iface;
+-	s->refresh = 50;
++	s->refresh = 80;
+ 
+ 	if (hlen) {
+ 		s->host = strncpy(host_buf, s->entry, hlen);
+@@ -355,7 +367,7 @@ void cache_answer(struct interface *iface, struct sockaddr *from, uint8_t *base,
+ 		} else {
+ 			r->ttl = a->ttl;
+ 			r->time = now;
+-			r->refresh = 50;
++			r->refresh = 80;
+ 			DBG(1, "A -> %s %s ttl:%d\n", dns_type_string(r->type), r->record, r->ttl);
+ 		}
+ 		return;
+@@ -380,7 +392,7 @@ void cache_answer(struct interface *iface, struct sockaddr *from, uint8_t *base,
+ 	memcpy(&r->from, from, sizeof(struct sockaddr_in6));
+ else
+ 	memcpy(&r->from, from, sizeof(struct sockaddr_in));
+-	r->refresh = 50;
++	r->refresh = 80;
+ 
+ 	if (tlen)
+ 		r->txt = memcpy(txt_ptr, rdata_buffer, tlen);
